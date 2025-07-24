@@ -8,7 +8,7 @@ const frontendlib = require('../modules/frontendlib');
 const hostproject = require('../modules/hostproject');
 const utils = require('../utils');
 
-module.exports.createApp = async (appPath, template) => {
+module.exports.createApp = async (appPath, template, owner = null, branch = null) => {
     const binaryName = path.basename(path.resolve(appPath));
 
     if (utils.isNeutralinojsProject(appPath)) {
@@ -30,17 +30,36 @@ module.exports.createApp = async (appPath, template) => {
 
     utils.log(`Downloading ${template} template to ${binaryName} directory...`);
 
+    if (owner || branch) {
+        const repoOwner = owner || 'neutralinojs';
+        const repoBranch = branch || 'main';
+        utils.log(`Using custom Neutralino.js repository: ${repoOwner}/neutralinojs${branch ? ` (${repoBranch} branch)` : ''}`);
+
+        // Validate custom repository
+        if (owner && owner !== 'neutralinojs') {
+            utils.log('Validating custom repository...');
+            const isValid = await downloader.isValidCustomRepo(repoOwner, repoBranch);
+            if (!isValid) {
+                utils.error(`Custom repository ${repoOwner}/neutralinojs does not exist or is not accessible.`);
+                process.exit(1);
+            }
+        }
+    }
+
     fs.mkdirSync(appPath, { recursive: true });
     process.chdir(appPath); // Change the path context for the following methods
 
     try {
         await downloader.downloadTemplate(template);
-        await downloader.downloadAndUpdateBinaries();
-        await downloader.downloadAndUpdateClient();
+        await downloader.downloadAndUpdateBinaries(false, owner, branch);
+        await downloader.downloadAndUpdateClient(false, owner);
     }
     catch(err) {
         utils.error('Unable to download resources from internet.' +
                     ' Please check your internet connection and template URLs.');
+        if (owner || branch) {
+            utils.error('Please verify that the custom repository and branch exist and are accessible.');
+        }
         process.exit(1);
     }
 

@@ -9,12 +9,12 @@ const zl = require('zip-lib');
 let cachedLatestClientVersion = null;
 
 
-let getRemoteLatestVersion = (repo) => {
+let getRemoteLatestVersion = (owner, repo) => {
     return new Promise((resolve, reject) => {
         let opt = {
             headers: { 'User-Agent': 'Neutralinojs CLI' }
         };
-        https.get(constants.remote.releasesApiUrl.replace('{repo}', repo), opt, function (response) {
+        https.get(constants.remote.releasesApiUrl.replace('{owner}', owner).replace('{repo}', repo), opt, function (response) {
             let body = '';
             response.on('data', (data) => body += data);
             response.on('end', () => {
@@ -35,14 +35,14 @@ let getRemoteLatestVersion = (repo) => {
     });
 }
 
-let getLatestVersion = (repo) => {
+let getLatestVersion = (owner, repo) => {
     return new Promise((resolve, reject) => {
         function fallback() {
             utils.warn('Unable to fetch the latest version tag from GitHub. Using nightly releases...');
             resolve('nightly');
         }
 
-        getRemoteLatestVersion(repo)
+        getRemoteLatestVersion(owner, repo)
             .then((version) => {
                 utils.log(`Found the latest release tag ${utils.getVersionTag(version)} for ${repo}...`);
                 resolve(version);
@@ -57,28 +57,43 @@ let getScriptExtension = () => {
     return clientLibrary.includes('.mjs') ? 'mjs' : 'js';
 }
 
-let getBinaryDownloadUrl = async (latest) => {
+let getBinaryDownloadUrl = async (latest, owner = null, branch = null) => {
     const configObj = config.get();
     let version = configObj.cli.binaryVersion;
 
+    // Use custom repository settings if provided
+    const repoOwner = owner || configObj.cli?.customRepo?.owner || constants.defaults.owner;
+    const repoBranch = branch || configObj.cli?.customRepo?.branch || constants.defaults.branch;
+
     if (!version || latest) {
-        version = await getLatestVersion('neutralinojs');
+        version = await getLatestVersion(repoOwner, 'neutralinojs');
         config.update('cli.binaryVersion', version);
     }
+
+    // If using custom repo/branch, use archive URL instead of release URL
+    if (owner || branch || configObj.cli?.customRepo) {
+        return constants.remote.binariesArchiveUrl
+            .replace('{owner}', repoOwner)
+            .replace('{branch}', repoBranch);
+    }
+
     return constants.remote.binariesUrl
         .replace(/\{tag\}/g, utils.getVersionTag(version));
 }
 
-let getClientDownloadUrl = async (latest, types = false) => {
+let getClientDownloadUrl = async (latest, types = false, owner = null) => {
     const configObj = config.get();
     let version = configObj.cli.clientVersion;
+
+    // Use custom repository settings if provided
+    const repoOwner = owner || configObj.cli?.customRepo?.owner || constants.defaults.owner;
 
     if (!version || latest) {
         if (cachedLatestClientVersion) {
             version = cachedLatestClientVersion;
         }
         else {
-            version = await getLatestVersion('neutralino.js');
+            version = await getLatestVersion(repoOwner, 'neutralino.js');
         }
         cachedLatestClientVersion = version;
         config.update('cli.clientVersion', version);
@@ -89,23 +104,36 @@ let getClientDownloadUrl = async (latest, types = false) => {
         .replace(/\{tag\}/g, utils.getVersionTag(version));
 }
 
-let getTypesDownloadUrl = (latest) => {
-    return getClientDownloadUrl(latest, true);
+let getTypesDownloadUrl = (latest, owner = null) => {
+    return getClientDownloadUrl(latest, true, owner);
 }
 
 let getRepoNameFromTemplate = (template) => {
     return template.split('/')[1];
 }
 
-let downloadBinariesFromRelease = (latest) => {
+let downloadBinariesFromRelease = (latest, owner = null, branch = null) => {
     return new Promise((resolve, reject) => {
         fs.mkdirSync('.tmp', { recursive: true });
         const zipFilename = '.tmp/binaries.zip';
         const file = fs.createWriteStream(zipFilename);
-        utils.log('Downloading Neutralinojs binaries..');
-        getBinaryDownloadUrl(latest)
+
+        const repoOwner = owner || constants.defaults.owner;
+        const repoBranch = branch || constants.defaults.branch;
+
+        if (owner || branch) {
+            utils.log(`Downloading Neutralinojs binaries from ${repoOwner}/neutralinojs (${repoBranch} branch)..`);
+        } else {
+            utils.log('Downloading Neutralinojs binaries..');
+        }
+
+        getBinaryDownloadUrl(latest, owner, branch)
             .then((url) => {
                 https.get(url, function (response) {
+                    if (response.statusCode !== 200) {
+                        reject(new Error(`Failed to download from ${url}. Status: ${response.statusCode}. Please check if the repository and branch exist.`));
+                        return;
+                    }
                     response.pipe(file);
                     response.on('end', () => {
                         utils.log('Extracting binaries.zip file...');
@@ -113,45 +141,65 @@ let downloadBinariesFromRelease = (latest) => {
                             .then(() => resolve())
                             .catch((e) => reject(e));
                     });
+                })
+                .on('error', (e) => {
+                    reject(new Error(`Failed to download binaries: ${e.message}. Please check if the repository and branch exist.`));
                 });
-            });
+            })
+            .catch((e) => reject(e));
     });
 }
 
-let downloadClientFromRelease = (latest) => {
+let downloadClientFromRelease = (latest, owner = null) => {
     return new Promise((resolve, reject) => {
         fs.mkdirSync('.tmp', { recursive: true });
         const file = fs.createWriteStream('.tmp/neutralino.' + getScriptExtension());
         utils.log('Downloading the Neutralinojs client..');
-        getClientDownloadUrl(latest)
+        getClientDownloadUrl(latest, false, owner)
             .then((url) => {
                 https.get(url, function (response) {
+                    if (response.statusCode !== 200) {
+                        reject(new Error(`Failed to download client from ${url}. Status: ${response.statusCode}`));
+                        return;
+                    }
                     response.pipe(file);
                     file.on('finish', () => {
                         file.close();
                         resolve();
                     });
+                })
+                .on('error', (e) => {
+                    reject(new Error(`Failed to download client: ${e.message}`));
                 });
-            });
+            })
+            .catch((e) => reject(e));
     });
 }
 
-let downloadTypesFromRelease = (latest) => {
+let downloadTypesFromRelease = (latest, owner = null) => {
     return new Promise((resolve, reject) => {
         fs.mkdirSync('.tmp', { recursive: true });
         const file = fs.createWriteStream('.tmp/neutralino.d.ts');
         utils.log('Downloading the Neutralinojs types..');
 
-        getTypesDownloadUrl(latest)
+        getTypesDownloadUrl(latest, owner)
             .then((url) => {
                 https.get(url, function (response) {
+                    if (response.statusCode !== 200) {
+                        reject(new Error(`Failed to download types from ${url}. Status: ${response.statusCode}`));
+                        return;
+                    }
                     response.pipe(file);
                     file.on('finish', () => {
                         file.close();
                         resolve();
                     });
+                })
+                .on('error', (e) => {
+                    reject(new Error(`Failed to download types: ${e.message}`));
                 });
-            });
+            })
+            .catch((e) => reject(e));
     });
 }
 
@@ -177,17 +225,45 @@ module.exports.downloadTemplate = (template) => {
     });
 }
 
-module.exports.downloadAndUpdateBinaries = async (latest = false) => {
-    await downloadBinariesFromRelease(latest);
+module.exports.downloadAndUpdateBinaries = async (latest = false, owner = null, branch = null) => {
+    // Store custom repo settings in config if provided
+    if (owner || branch) {
+        const configObj = config.get();
+        if (!configObj.cli) configObj.cli = {};
+        if (!configObj.cli.customRepo) configObj.cli.customRepo = {};
+
+        if (owner) {
+            configObj.cli.customRepo.owner = owner;
+            config.update('cli.customRepo.owner', owner);
+        }
+        if (branch) {
+            configObj.cli.customRepo.branch = branch;
+            config.update('cli.customRepo.branch', branch);
+        }
+    }
+
+    await downloadBinariesFromRelease(latest, owner, branch);
     utils.log('Finalizing and cleaning temp. files.');
     if (!fse.existsSync('bin'))
         fse.mkdirSync('bin');
 
+    // Check if we're using custom repo (archive format) or release format
+    const isCustomRepo = owner || branch || config.get().cli?.customRepo;
+    let sourceDir = '.tmp';
+
+    if (isCustomRepo) {
+        // For custom repos, binaries are in neutralinojs-{branch}/bin/ folder
+        const repoOwner = owner || config.get().cli?.customRepo?.owner || constants.defaults.owner;
+        const repoBranch = branch || config.get().cli?.customRepo?.branch || constants.defaults.branch;
+        sourceDir = `.tmp/neutralinojs-${repoBranch}/bin`;
+    }
+
     for (let platform in constants.files.binaries) {
         for (let arch in constants.files.binaries[platform]) {
             let binaryFile = constants.files.binaries[platform][arch];
-            if (fse.existsSync(`.tmp/${binaryFile}`)) {
-                fse.copySync(`.tmp/${binaryFile}`, `bin/${binaryFile}`);
+            const sourcePath = isCustomRepo ? `${sourceDir}/${binaryFile}` : `.tmp/${binaryFile}`;
+            if (fse.existsSync(sourcePath)) {
+                fse.copySync(sourcePath, `bin/${binaryFile}`);
                 // Ensure that correct permissions are set
                 // Non-applicable on Windows platform and not needed for Windows executables
                 if (process.platform !== 'win32' && platform !== 'win32') {
@@ -198,21 +274,33 @@ module.exports.downloadAndUpdateBinaries = async (latest = false) => {
     }
 
     for (let dependency of constants.files.dependencies) {
-        fse.copySync(`.tmp/${dependency}`, `bin/${dependency}`);
+        const sourcePath = isCustomRepo ? `${sourceDir}/${dependency}` : `.tmp/${dependency}`;
+        if (fse.existsSync(sourcePath)) {
+            fse.copySync(sourcePath, `bin/${dependency}`);
+        }
     }
     utils.clearDirectory('.tmp');
 }
 
-module.exports.downloadAndUpdateClient = async (latest = false) => {
+module.exports.downloadAndUpdateClient = async (latest = false, owner = null) => {
     const configObj = config.get();
     if (!configObj.cli.clientLibrary) {
         utils.log(`neu CLI won't download the client library --` +
             ` download @neutralinojs/lib from your Node package manager.`);
         return;
     }
+
+    // Store custom repo owner in config if provided
+    if (owner) {
+        if (!configObj.cli) configObj.cli = {};
+        if (!configObj.cli.customRepo) configObj.cli.customRepo = {};
+        configObj.cli.customRepo.owner = owner;
+        config.update('cli.customRepo.owner', owner);
+    }
+
     const clientLibrary = utils.trimPath(configObj.cli.clientLibrary);
-    await downloadClientFromRelease(latest);
-    await downloadTypesFromRelease(latest);
+    await downloadClientFromRelease(latest, owner);
+    await downloadTypesFromRelease(latest, owner);
     utils.log('Finalizing and cleaning temp. files...');
     fse.copySync(`.tmp/${constants.files.clientLibraryPrefix + getScriptExtension()}`
         , `./${clientLibrary}`);
@@ -250,6 +338,36 @@ module.exports.isValidTemplate = (template) => {
         });
     });
 
+}
+
+module.exports.isValidCustomRepo = (owner, branch = 'main') => {
+    return new Promise((resolve) => {
+        let opt = {
+            headers: { 'User-Agent': 'Neutralinojs CLI' }
+        };
+
+        function fallback() {
+            utils.warn('Unable to check the custom repository validity via the GitHub API. Assuming that the repository is valid...');
+            resolve(true);
+        }
+
+        const checkUrl = `https://api.github.com/repos/${owner}/neutralinojs/contents/bin`;
+        https.get(checkUrl, opt, function (response) {
+            response.req.abort();
+            if(response.statusCode == 200) {
+                resolve(true);
+            }
+            else if(response.statusCode == 404) {
+                resolve(false);
+            }
+            else {
+                fallback();
+            }
+        })
+        .on('error', (e) => {
+            fallback();
+        });
+    });
 }
 
 module.exports.getRemoteLatestVersion = getRemoteLatestVersion;

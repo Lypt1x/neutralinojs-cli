@@ -42,6 +42,17 @@ describe('Run neu update command and its options', () => {
             output.data.includes('Neutralinojs client: nightly'));
         });
     });
+    describe('Test custom repository options', () => {
+        it('shows help for custom repository options', async() => {
+            let output = runner.run('neu update --help');
+
+            assert.equal(output.error, null);
+            assert.equal(output.status, 0);
+            assert.ok(typeof output.data == 'string');
+            assert.ok(output.data.includes('--owner <owner>'));
+            assert.ok(output.data.includes('--branch <branch>'));
+        });
+    });
     after(() => {
         process.chdir('..');
         runner.cleanup();

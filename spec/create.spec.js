@@ -10,6 +10,8 @@ describe('Run neu create command and its options', () => {
             assert.equal(output.status, 0);
             assert.ok(typeof output.data == 'string');
             assert.ok(output.data.includes('Usage: neu create [options] <binaryName>'));
+            assert.ok(output.data.includes('--owner <owner>'));
+            assert.ok(output.data.includes('--branch <branch>'));
         });
     });
     describe('Test neu test app creation', () => {
