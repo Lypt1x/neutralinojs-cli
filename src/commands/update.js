@@ -6,15 +6,15 @@ module.exports.register = (program) => {
         .command('update')
         .description('updates neutralinojs binaries, client library, and TypeScript definitions')
         .option('-l, --latest')
-        .option('--owner <owner>', 'specify custom GitHub repository owner (e.g., "Lypt1x")')
-        .option('--branch <branch>', 'specify custom GitHub repository branch (e.g., "feature-branch")')
+        .option('--owner <owner>', 'specify custom GitHub repository owner with releases (e.g., "Lypt1x")')
+        .option('--branch <branch>', 'specify custom GitHub repository branch for client library (e.g., "feature-branch")')
         .action(async (command) => {
             utils.checkCurrentProject();
 
             if (command.owner || command.branch) {
                 const owner = command.owner || 'neutralinojs';
                 const branch = command.branch || 'main';
-                utils.log(`Using custom repository: ${owner}/neutralinojs${command.branch ? ` (${branch} branch)` : ''}`);
+                utils.log(`Using custom repository settings: ${owner}/neutralinojs${command.branch ? ` (${branch} branch for client)` : ''}`);
 
                 // Validate custom repository
                 if (command.owner && command.owner !== 'neutralinojs') {

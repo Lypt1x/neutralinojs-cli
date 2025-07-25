@@ -70,11 +70,25 @@ let getBinaryDownloadUrl = async (latest, owner = null, branch = null) => {
         config.update('cli.binaryVersion', version);
     }
 
-    // If using custom repo/branch, use archive URL instead of release URL
+    // If using custom repo, check if it has releases with binaries
     if (owner || branch || configObj.cli?.customRepo) {
-        return constants.remote.binariesArchiveUrl
-            .replace('{owner}', repoOwner)
-            .replace('{branch}', repoBranch);
+        const hasCustomReleases = await checkCustomRepoReleases(repoOwner);
+
+        if (hasCustomReleases && version !== 'nightly') {
+            // Use custom repository releases if available
+            return constants.remote.binariesUrl
+                .replace('neutralinojs/neutralinojs', `${repoOwner}/neutralinojs`)
+                .replace(/\{tag\}/g, utils.getVersionTag(version));
+        } else {
+            // Warn user and fall back to official repository
+            utils.warn(`Custom repository ${repoOwner}/neutralinojs does not have pre-compiled binary releases.`);
+            utils.warn('Falling back to official neutralinojs repository binaries.');
+            utils.warn('Note: The binaries may not include changes from the custom repository.');
+
+            // Use official repository binaries
+            return constants.remote.binariesUrl
+                .replace(/\{tag\}/g, utils.getVersionTag(version));
+        }
     }
 
     return constants.remote.binariesUrl
@@ -112,20 +126,52 @@ let getRepoNameFromTemplate = (template) => {
     return template.split('/')[1];
 }
 
+let checkCustomRepoReleases = (owner) => {
+    return new Promise((resolve) => {
+        if (owner === constants.defaults.owner) {
+            resolve(true); // Official repo always has releases
+            return;
+        }
+
+        let opt = {
+            headers: { 'User-Agent': 'Neutralinojs CLI' }
+        };
+
+        const releasesUrl = `https://api.github.com/repos/${owner}/neutralinojs/releases`;
+        https.get(releasesUrl, opt, function (response) {
+            let body = '';
+            response.on('data', (data) => body += data);
+            response.on('end', () => {
+                try {
+                    if (response.statusCode === 200) {
+                        const releases = JSON.parse(body);
+                        // Check if there are any releases with assets (binaries)
+                        const hasValidReleases = releases.some(release =>
+                            release.assets && release.assets.length > 0 &&
+                            release.assets.some(asset => asset.name.includes('neutralinojs-'))
+                        );
+                        resolve(hasValidReleases);
+                    } else {
+                        resolve(false);
+                    }
+                } catch (error) {
+                    resolve(false);
+                }
+            });
+        })
+        .on('error', () => {
+            resolve(false);
+        });
+    });
+}
+
 let downloadBinariesFromRelease = (latest, owner = null, branch = null) => {
     return new Promise((resolve, reject) => {
         fs.mkdirSync('.tmp', { recursive: true });
         const zipFilename = '.tmp/binaries.zip';
         const file = fs.createWriteStream(zipFilename);
 
-        const repoOwner = owner || constants.defaults.owner;
-        const repoBranch = branch || constants.defaults.branch;
-
-        if (owner || branch) {
-            utils.log(`Downloading Neutralinojs binaries from ${repoOwner}/neutralinojs (${repoBranch} branch)..`);
-        } else {
-            utils.log('Downloading Neutralinojs binaries..');
-        }
+        utils.log('Downloading Neutralinojs binaries..');
 
         getBinaryDownloadUrl(latest, owner, branch)
             .then((url) => {
@@ -247,23 +293,12 @@ module.exports.downloadAndUpdateBinaries = async (latest = false, owner = null, 
     if (!fse.existsSync('bin'))
         fse.mkdirSync('bin');
 
-    // Check if we're using custom repo (archive format) or release format
-    const isCustomRepo = owner || branch || config.get().cli?.customRepo;
-    let sourceDir = '.tmp';
-
-    if (isCustomRepo) {
-        // For custom repos, binaries are in neutralinojs-{branch}/bin/ folder
-        const repoOwner = owner || config.get().cli?.customRepo?.owner || constants.defaults.owner;
-        const repoBranch = branch || config.get().cli?.customRepo?.branch || constants.defaults.branch;
-        sourceDir = `.tmp/neutralinojs-${repoBranch}/bin`;
-    }
-
+    // All binaries now come from release format (either official or custom repo releases)
     for (let platform in constants.files.binaries) {
         for (let arch in constants.files.binaries[platform]) {
             let binaryFile = constants.files.binaries[platform][arch];
-            const sourcePath = isCustomRepo ? `${sourceDir}/${binaryFile}` : `.tmp/${binaryFile}`;
-            if (fse.existsSync(sourcePath)) {
-                fse.copySync(sourcePath, `bin/${binaryFile}`);
+            if (fse.existsSync(`.tmp/${binaryFile}`)) {
+                fse.copySync(`.tmp/${binaryFile}`, `bin/${binaryFile}`);
                 // Ensure that correct permissions are set
                 // Non-applicable on Windows platform and not needed for Windows executables
                 if (process.platform !== 'win32' && platform !== 'win32') {
@@ -274,9 +309,8 @@ module.exports.downloadAndUpdateBinaries = async (latest = false, owner = null, 
     }
 
     for (let dependency of constants.files.dependencies) {
-        const sourcePath = isCustomRepo ? `${sourceDir}/${dependency}` : `.tmp/${dependency}`;
-        if (fse.existsSync(sourcePath)) {
-            fse.copySync(sourcePath, `bin/${dependency}`);
+        if (fse.existsSync(`.tmp/${dependency}`)) {
+            fse.copySync(`.tmp/${dependency}`, `bin/${dependency}`);
         }
     }
     utils.clearDirectory('.tmp');
@@ -351,7 +385,8 @@ module.exports.isValidCustomRepo = (owner, branch = 'main') => {
             resolve(true);
         }
 
-        const checkUrl = `https://api.github.com/repos/${owner}/neutralinojs/contents/bin`;
+        // Check if the repository exists
+        const checkUrl = `https://api.github.com/repos/${owner}/neutralinojs`;
         https.get(checkUrl, opt, function (response) {
             response.req.abort();
             if(response.statusCode == 200) {
